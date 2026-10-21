@@ -2,7 +2,7 @@ name: AiTestingTool Playwright
 
 on:
   push:
-    branches: [main, master, demo-es]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

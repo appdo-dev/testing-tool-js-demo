@@ -16,6 +16,11 @@ Thư mục này chứa toàn bộ tài liệu kiến trúc, cấu hình, script 
 | [`media/demo_step4_terminal_execution.png`](./media/demo_step4_terminal_execution.png) | Ảnh Bước 4: Kết quả thực thi script Demo trên Terminal |
 | [`media/demo_step5_jira_builds_sync.png`](./media/demo_step5_jira_builds_sync.png) | Ảnh Bước 5: Màn hình Jira `Empty Space (ES)` → `Test design` với các Suites & Automated TestCases (`ES-1024..ES-1057`) |
 | [`media/demo_jira_test_execution.png`](./media/demo_jira_test_execution.png) | Ảnh Bước 6: Màn hình Jira `Empty Space (ES)` → `Test execution` với các bản ghi `Automated` `PASSED` (`ES-1071..ES-1076`) |
+| [`media/demo_playwright_step1_jira_setup.png`](./media/demo_playwright_step1_jira_setup.png) | Ảnh Playwright Bước 1: Màn hình CI/CD Pipeline → GitHub Actions → Setup → Playwright trên Jira (`ES`) |
+| [`media/demo_playwright_step3_github_actions_run.png`](./media/demo_playwright_step3_github_actions_run.png) | Ảnh Playwright Bước 2: GitHub Actions Cloud Runner thực thi `AiTestingTool Playwright #1` (`Run ID 39618287339`) và nhận `HTTP 201` |
+| [`media/demo_playwright_step5_jira_test_design.png`](./media/demo_playwright_step5_jira_test_design.png) | Ảnh Playwright Bước 3: Cây thư mục `E-commerce` (`Checkout`, `Inventory`, `Shopping Cart`) và TestCase `ES-1087` trên Jira `Test design` |
+| [`media/demo_playwright_jira_test_execution.png`](./media/demo_playwright_jira_test_execution.png) | Ảnh Playwright Bước 4: Các bản ghi E2E `Automated` `PASSED` (`ES-1085..ES-1101`) trên Jira `Test execution` |
+| [`media/demo_playwright_test_pad_steps.png`](./media/demo_playwright_test_pad_steps.png) | Ảnh Playwright Bước 5: Các bước `await test.step(...)` hiển thị trực tiếp trong Jira Test Pad (`ES-1090`) |
 
 ---
 
@@ -97,3 +102,31 @@ Sau khi Forge Web Trigger (`ingest.ts`) trả về `HTTP 201 {"ok":true}`, worke
 Trên tab **Test execution** của project **`ES`**, các bản ghi **TestExecution (`ES-1071` … `ES-1080`)** được ghi nhận với loại **`Automated`** và trạng thái **`PASSED`**:
 
 ![Bước 6: Màn hình Test execution trên Jira Project ES sau khi đồng bộ](./media/demo_jira_test_execution.png)
+
+---
+
+## 3. Luồng GitHub Actions với Playwright E2E (`AiTestingTool Playwright`)
+
+Ngoài Vitest, dự án đã cấu hình và chạy thực tế workflow **Playwright E2E** ([`.github/workflows/ai-testing-tool-playwright.yml`](../../.github/workflows/ai-testing-tool-playwright.yml)) cùng [`playwright.config.js`](../../playwright.config.js) kiểm thử end-to-end trên trình duyệt Chromium (`https://www.saucedemo.com`) với 4 spec files (`login.spec.js`, `inventory.spec.js`, `cart.spec.js`, `checkout.spec.js` — **13 E2E tests, 30 native `test.step` steps**).
+
+### 3.1. Lấy cấu hình Playwright trên Jira (`Setup GitHub Actions → Playwright`)
+![Playwright Bước 1: Setup GitHub Actions → Playwright trên Jira Project ES](./media/demo_playwright_step1_jira_setup.png)
+
+### 3.2. GitHub Actions Cloud Runner thực thi `AiTestingTool Playwright #1` (`HTTP 201`)
+- **Link lượt chạy thực tế:** [`https://github.com/danhhoangjunior/testing-tool-js-demo/actions/runs/39618287339/job/119284723328`](https://github.com/danhhoangjunior/testing-tool-js-demo/actions/runs/39618287339/job/119284723328)
+- Thực thi `npx playwright install --with-deps`, `npx playwright test --reporter=json > ai-testing-tool-results.json` và đẩy qua `npx @ai-testing-tool/forge-api-client` (tự động chuyển đổi báo cáo JSON gốc của Playwright sang chuẩn FR41 qua `convertPlaywrightJsonReport`), nhận phản hồi **`Ingest upload: 100% — Ingest accepted (HTTP 201)`**:
+
+![Playwright Bước 2: GitHub Actions thực thi AiTestingTool Playwright #1](./media/demo_playwright_step3_github_actions_run.png)
+
+### 3.3. Đồng bộ Cây Thư Mục `E-commerce` & TestCase trên Jira (`Test design`)
+Worker `launch-sync.ts` tự động tạo cây thư mục `E-commerce` (`Checkout` → `Complete Flow`, `Validation`, `Navigation`, `Demo`; `Inventory` → `Browsing`, `Sorting`, `Product Details`; `Shopping Cart` → `Add Items`, `Remove Items`, `Multiple Items`) và liên kết TestCase `ES-1087` với lượt chạy `ES-1090`:
+
+![Playwright Bước 3: Cây thư mục E-commerce và TestCase ES-1087 trên Jira Test design](./media/demo_playwright_step5_jira_test_design.png)
+
+### 3.4. Đồng bộ Bản Ghi Thực Thi E2E (`Test execution`) & Các Bước `test.step` (`Test Pad`)
+Trên tab **Test execution**, các bản ghi `Automated` **`PASSED`** (`ES-1085` … `ES-1101`) được ghi nhận đầy đủ; khi mở chi tiết **Test Pad (`ES-1090`)**, toàn bộ 5 bước `await test.step(...)` của Playwright được bóc tách trực tiếp vào mục **STEPS EXECUTION**:
+
+![Playwright Bước 4: Màn hình Test execution với các bản ghi Playwright E2E PASSED](./media/demo_playwright_jira_test_execution.png)
+
+![Playwright Bước 5: Các bước await test.step(...) của Playwright trong Jira Test Pad (ES-1090)](./media/demo_playwright_test_pad_steps.png)
+
