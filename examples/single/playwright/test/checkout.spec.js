@@ -23,7 +23,9 @@ test.describe('Checkout Process', () => {
 
     await inventoryPage.addToCart('sauce-labs-backpack');
     await inventoryPage.goToCart();
+    await expect(page).toHaveURL(/.*cart\.html/);
     await cartPage.checkout();
+    await expect(page).toHaveURL(/.*checkout-step-one\.html/);
   });
 
   test('User can complete checkout with valid information', async ({ page }) => {
@@ -81,8 +83,7 @@ test.describe('Checkout Process', () => {
 
     await test.step('Verify return to cart page', async () => {
       await expect(page).toHaveURL(/.*cart\.html/);
-      const title = await page.locator(cartPage.pageTitle).textContent();
-      expect(title).toBe('Your Cart');
+      await expect(page.locator(cartPage.pageTitle)).toHaveText('Your Cart');
     });
   });
 

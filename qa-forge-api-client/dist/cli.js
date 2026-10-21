@@ -85,6 +85,238 @@ function readText(path) {
     const absolute = (0, path_1.resolve)(process.cwd(), path);
     return (0, fs_1.readFileSync)(absolute, 'utf8');
 }
+const QA_METADATA_CONTENT_TYPE = 'application/ai-testing-tool.metadata+json';
+function isPlaywrightNativeJsonReport(parsed) {
+    return (Boolean(parsed) &&
+        typeof parsed === 'object' &&
+        'suites' in parsed &&
+        Array.isArray(parsed.suites) &&
+        !('testResults' in parsed));
+}
+function mapPlaywrightNativeStatus(status) {
+    if (status === 'passed')
+        return 'passed';
+    if (status === 'skipped')
+        return 'pending';
+    if (status === 'failed' || status === 'timedOut' || status === 'interrupted') {
+        return 'failed';
+    }
+    return 'pending';
+}
+function convertPlaywrightJsonReport(pw) {
+    const rootDir = pw.config?.rootDir ?? process.cwd();
+    const byFile = new Map();
+    const walkSuite = (suite, ancestors) => {
+        const isFileSuite = Boolean(suite.file && suite.title === suite.file);
+        const nextAncestors = suite.title && !isFileSuite ? [...ancestors, suite.title] : ancestors;
+        for (const spec of suite.specs ?? []) {
+            const file = spec.file ?? suite.file ?? 'unknown';
+            const fullPath = (0, path_1.resolve)(rootDir, file);
+            for (const testItem of spec.tests ?? []) {
+                const result = testItem.results?.[testItem.results.length - 1] ??
+                    testItem.results?.[0];
+                if (!result)
+                    continue;
+                const acc = (0, forge_commons_1.createQaMetaAccumulator)();
+                for (const att of result.attachments ?? []) {
+                    if (att.contentType !== QA_METADATA_CONTENT_TYPE || !att.body) {
+                        continue;
+                    }
+                    try {
+                        const decoded = Buffer.from(att.body, 'base64').toString('utf8');
+                        const msg = JSON.parse(decoded);
+                        if (typeof msg.title === 'string' && msg.title) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-title', body: msg.title });
+                        }
+                        if (typeof msg.comment === 'string' && msg.comment) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-comment', body: msg.comment });
+                        }
+                        if (typeof msg.suite === 'string' && msg.suite) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-suite', body: msg.suite });
+                        }
+                        if (typeof msg.suiteId === 'string' && msg.suiteId) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-suite-id',
+                                body: msg.suiteId,
+                            });
+                        }
+                        if (typeof msg.planId === 'string' && msg.planId) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-plan-id', body: msg.planId });
+                        }
+                        if (typeof msg.planName === 'string' && msg.planName) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-plan', body: msg.planName });
+                        }
+                        if (typeof msg.fixVersion === 'string' && msg.fixVersion) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-fix-version',
+                                body: msg.fixVersion,
+                            });
+                        }
+                        if (typeof msg.sprintName === 'string' && msg.sprintName) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-sprint-name',
+                                body: msg.sprintName,
+                            });
+                        }
+                        if (msg.labels !== undefined && msg.labels !== null) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-labels',
+                                body: msg.labels,
+                            });
+                        }
+                        if (msg.fields && typeof msg.fields === 'object') {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-fields',
+                                body: msg.fields,
+                            });
+                        }
+                        if (msg.parameters && typeof msg.parameters === 'object') {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-parameters',
+                                body: msg.parameters,
+                            });
+                        }
+                        if (Array.isArray(msg.issueKeys) && msg.issueKeys.length > 0) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                type: 'qa-issue-keys',
+                                body: msg.issueKeys,
+                            });
+                        }
+                        if (msg.ignore) {
+                            (0, forge_commons_1.applyQaAnnotation)(acc, { type: 'qa-ignore', body: true });
+                        }
+                        if (Array.isArray(msg.attachments)) {
+                            for (const item of msg.attachments) {
+                                if (item && typeof item === 'object') {
+                                    const rec = item;
+                                    (0, forge_commons_1.applyQaAnnotation)(acc, {
+                                        type: 'qa-attach',
+                                        body: { name: rec.name, contentType: rec.contentType },
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        // ignore malformed metadata attachment
+                    }
+                }
+                const walkSteps = (steps) => {
+                    for (const step of steps ?? []) {
+                        if (step.category && step.category !== 'test.step') {
+                            walkSteps(step.steps);
+                            continue;
+                        }
+                        if (step.title) {
+                            acc.steps.push({
+                                name: step.title,
+                                status: step.error ? 'failed' : 'passed',
+                            });
+                        }
+                        walkSteps(step.steps);
+                    }
+                };
+                walkSteps(result.steps);
+                const wire = (0, forge_commons_1.toQaMetaWire)(acc, {
+                    framework: 'playwright',
+                    reporter: '@ai-testing-tool/forge-playwright',
+                });
+                const title = spec.title ?? 'unknown';
+                const fullName = nextAncestors.length > 0
+                    ? `${nextAncestors.join(' ')} ${title}`
+                    : title;
+                const failureMessages = (result.errors ?? [])
+                    .map((e) => {
+                    if (typeof e === 'string')
+                        return e;
+                    if (e && typeof e === 'object' && 'message' in e) {
+                        return String(e.message ?? '');
+                    }
+                    return String(e);
+                })
+                    .filter(Boolean);
+                const assertion = {
+                    fullName,
+                    title,
+                    status: mapPlaywrightNativeStatus(result.status),
+                    duration: result.duration,
+                    failureMessages,
+                };
+                if (wire) {
+                    assertion.meta = { qa: wire };
+                }
+                const entry = byFile.get(fullPath) ?? { assertions: [] };
+                const startMs = result.startTime
+                    ? Date.parse(result.startTime)
+                    : undefined;
+                if (startMs && (!entry.startTime || startMs < entry.startTime)) {
+                    entry.startTime = startMs;
+                }
+                if (startMs && typeof result.duration === 'number') {
+                    const endMs = startMs + result.duration;
+                    if (!entry.endTime || endMs > entry.endTime) {
+                        entry.endTime = endMs;
+                    }
+                }
+                entry.assertions.push(assertion);
+                byFile.set(fullPath, entry);
+            }
+        }
+        for (const child of suite.suites ?? []) {
+            walkSuite(child, nextAncestors);
+        }
+    };
+    for (const suite of pw.suites ?? []) {
+        walkSuite(suite, []);
+    }
+    const testResults = [];
+    let numPassedTests = 0;
+    let numFailedTests = 0;
+    let numPendingTests = 0;
+    let numTodoTests = 0;
+    for (const [file, data] of byFile) {
+        if (data.assertions.length === 0)
+            continue;
+        for (const a of data.assertions) {
+            if (a.status === 'passed')
+                numPassedTests += 1;
+            else if (a.status === 'failed')
+                numFailedTests += 1;
+            else if (a.status === 'todo')
+                numTodoTests += 1;
+            else
+                numPendingTests += 1;
+        }
+        const status = data.assertions.some((a) => a.status === 'failed')
+            ? 'failed'
+            : 'passed';
+        testResults.push({
+            name: (0, forge_commons_1.normalizeReportFilePath)(file),
+            status,
+            startTime: data.startTime,
+            endTime: data.endTime,
+            assertionResults: data.assertions,
+        });
+    }
+    const numFailedTestSuites = testResults.filter((t) => t.status === 'failed').length;
+    const startTime = pw.stats?.startTime
+        ? Date.parse(pw.stats.startTime)
+        : Date.now();
+    return {
+        numTotalTestSuites: testResults.length,
+        numPassedTestSuites: testResults.length - numFailedTestSuites,
+        numFailedTestSuites,
+        numPendingTestSuites: 0,
+        numTotalTests: numPassedTests + numFailedTests + numPendingTests + numTodoTests,
+        numPassedTests,
+        numFailedTests,
+        numPendingTests,
+        numTodoTests,
+        startTime,
+        success: numFailedTests === 0,
+        testResults,
+    };
+}
 function readJsonReport(path) {
     const parsed = JSON.parse(readText(path));
     if (parsed &&
@@ -93,13 +325,18 @@ function readJsonReport(path) {
         'projectKey' in parsed) {
         return parsed.report;
     }
+    if (isPlaywrightNativeJsonReport(parsed)) {
+        return convertPlaywrightJsonReport(parsed);
+    }
     return parsed;
 }
 function remapReportIssueKeyPrefix(report, fromProjectKey, toProjectKey) {
-    if (!fromProjectKey || fromProjectKey === toProjectKey) {
+    if (fromProjectKey && fromProjectKey === toProjectKey) {
         return report;
     }
-    const prefixPattern = new RegExp(`^${fromProjectKey}-(\\d+)$`);
+    const prefixPattern = fromProjectKey
+        ? new RegExp(`^${fromProjectKey}-(\\d+)$`)
+        : /^[A-Z][A-Z0-9_]*-(\d+)$/;
     return {
         ...report,
         testResults: report.testResults?.map((suite) => ({
@@ -186,7 +423,7 @@ async function main() {
         }
         : (0, forge_commons_1.buildIngestPayload)({
             projectKey: resolvedProjectKey,
-            report: readJsonReport(reportPath),
+            report: remapReportIssueKeyPrefix(readJsonReport(reportPath), undefined, resolvedProjectKey),
             format,
             launchName: args.launch ?? merged.launchName,
             planId: args.planId ?? merged.planId,

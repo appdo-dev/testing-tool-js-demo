@@ -1,0 +1,31 @@
+name: AiTestingTool Playwright
+
+on:
+  push:
+    branches: [main, master, demo-es]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps
+      - name: Run Playwright
+        run: npx playwright test --reporter=json > ai-testing-tool-results.json
+      - name: Upload to AiTestingTool
+        if: always()
+        env:
+          AI_TESTING_TOOL_INGEST_URL: ${{ secrets.AI_TESTING_TOOL_INGEST_URL }}
+          AI_TESTING_TOOL_INGEST_TOKEN: ${{ secrets.AI_TESTING_TOOL_INGEST_TOKEN }}
+        run: |
+          npx @ai-testing-tool/forge-api-client \
+            --project "${{ vars.JIRA_PROJECT_KEY }}" \
+            --launch "${{ github.workflow }} #${{ github.run_number }}" \
+            --report ai-testing-tool-results.json

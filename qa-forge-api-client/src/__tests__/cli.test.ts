@@ -197,4 +197,157 @@ qaDescribe('@ai-testing-tool/forge-api-client CLI', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  qaItAuto('converts Playwright native --reporter=json output into FR41 report on upload', async () => {
+    const http = await import('node:http');
+    const dir = mkdtempSync(join(tmpdir(), 'qa-cli-pw-'));
+    const reportPath = join(dir, 'ai-testing-tool-results.json');
+    const qaAttachmentBody = Buffer.from(
+      JSON.stringify({
+        issueKeys: ['AUTH-101'],
+        suite: 'E-commerce\tAuthentication\tLogin',
+        fields: { severity: 'critical', priority: 'high', layer: 'e2e' },
+      }),
+      'utf8',
+    ).toString('base64');
+
+    writeFileSync(
+      reportPath,
+      JSON.stringify({
+        config: { rootDir: dir },
+        suites: [
+          {
+            title: 'login.spec.js',
+            file: 'login.spec.js',
+            suites: [
+              {
+                title: 'Login Functionality',
+                file: 'login.spec.js',
+                specs: [
+                  {
+                    title: 'Successful login with valid credentials',
+                    file: 'login.spec.js',
+                    tests: [
+                      {
+                        projectName: 'chromium',
+                        results: [
+                          {
+                            status: 'passed',
+                            duration: 850,
+                            startTime: '2026-10-21T14:00:00.000Z',
+                            errors: [],
+                            attachments: [
+                              {
+                                name: 'ai-testing-tool:metadata',
+                                contentType: 'application/ai-testing-tool.metadata+json',
+                                body: qaAttachmentBody,
+                              },
+                            ],
+                            steps: [
+                              {
+                                title: 'Navigate to login page',
+                                duration: 200,
+                              },
+                              {
+                                title: 'Enter valid credentials',
+                                duration: 400,
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        stats: { startTime: '2026-10-21T14:00:00.000Z' },
+      }),
+    );
+
+    let capturedBody: Record<string, unknown> | undefined;
+    const server = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => {
+        raw += c;
+      });
+      req.on('end', () => {
+        capturedBody = JSON.parse(raw) as Record<string, unknown>;
+        res.writeHead(201, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const addr = server.address() as { port: number };
+    try {
+      const status = await new Promise<number | null>((resolve) => {
+        const child = spawn(
+          process.execPath,
+          [
+            cliPath,
+            '--project',
+            'ES',
+            '--launch',
+            'AiTestingTool Playwright #1',
+            '--report',
+            reportPath,
+            '--url',
+            `http://127.0.0.1:${addr.port}/ingest`,
+            '--token',
+            'qa_token_123',
+          ],
+          {
+            cwd: dir,
+            stdio: 'ignore',
+          },
+        );
+        child.on('close', (code) => resolve(code));
+      });
+      expect(status).toBe(0);
+      expect(capturedBody?.projectKey).toBe('ES');
+      expect(capturedBody?.launchName).toBe('AiTestingTool Playwright #1');
+      const report = capturedBody?.report as {
+        numTotalTests?: number;
+        numPassedTests?: number;
+        testResults?: Array<{
+          name?: string;
+          assertionResults?: Array<{
+            title?: string;
+            fullName?: string;
+            status?: string;
+            meta?: {
+              qa?: {
+                issueKeys?: string[];
+                suite?: string;
+                steps?: Array<{ name?: string; status?: string }>;
+              };
+            };
+          }>;
+        }>;
+      };
+      expect(report?.numTotalTests).toBe(1);
+      expect(report?.numPassedTests).toBe(1);
+      const assertion = report?.testResults?.[0]?.assertionResults?.[0];
+      expect(assertion?.title).toBe('Successful login with valid credentials');
+      expect(assertion?.fullName).toBe(
+        'Login Functionality Successful login with valid credentials',
+      );
+      expect(assertion?.meta?.qa?.issueKeys).toEqual(['ES-101']);
+      expect(assertion?.meta?.qa?.suite).toEqual([
+        { title: 'E-commerce' },
+        { title: 'Authentication' },
+        { title: 'Login' },
+      ]);
+      expect(assertion?.meta?.qa?.steps?.map((s) => s.name)).toEqual([
+        'Navigate to login page',
+        'Enter valid credentials',
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

@@ -9,9 +9,15 @@ import {
   envToConfig,
   loadConfig,
   composeOptions,
+  createQaMetaAccumulator,
+  applyQaAnnotation,
+  toQaMetaWire,
+  normalizeReportFilePath,
   type IngestFormat,
   type IngestPayload,
   type IngestUploadProgress,
+  type JestAssertionResult,
+  type JestTestFileResult,
   type JestVitestJsonReport,
 } from '@ai-testing-tool/forge-commons';
 
@@ -113,6 +119,310 @@ function readText(path: string): string {
   return readFileSync(absolute, 'utf8');
 }
 
+const QA_METADATA_CONTENT_TYPE = 'application/ai-testing-tool.metadata+json';
+
+type PlaywrightNativeStep = {
+  category?: string;
+  title?: string;
+  error?: unknown;
+  steps?: PlaywrightNativeStep[];
+};
+
+type PlaywrightNativeAttachment = {
+  name?: string;
+  contentType?: string;
+  body?: string;
+};
+
+type PlaywrightNativeResult = {
+  status?: string;
+  duration?: number;
+  startTime?: string;
+  errors?: Array<string | { message?: unknown }>;
+  attachments?: PlaywrightNativeAttachment[];
+  steps?: PlaywrightNativeStep[];
+};
+
+type PlaywrightNativeSpec = {
+  title?: string;
+  file?: string;
+  tests?: Array<{
+    projectName?: string;
+    results?: PlaywrightNativeResult[];
+  }>;
+};
+
+type PlaywrightNativeSuite = {
+  title?: string;
+  file?: string;
+  suites?: PlaywrightNativeSuite[];
+  specs?: PlaywrightNativeSpec[];
+};
+
+type PlaywrightNativeJsonReport = {
+  config?: { rootDir?: string };
+  suites?: PlaywrightNativeSuite[];
+  stats?: { startTime?: string };
+};
+
+function isPlaywrightNativeJsonReport(
+  parsed: unknown,
+): parsed is PlaywrightNativeJsonReport {
+  return (
+    Boolean(parsed) &&
+    typeof parsed === 'object' &&
+    'suites' in (parsed as Record<string, unknown>) &&
+    Array.isArray((parsed as PlaywrightNativeJsonReport).suites) &&
+    !('testResults' in (parsed as Record<string, unknown>))
+  );
+}
+
+function mapPlaywrightNativeStatus(
+  status: string | undefined,
+): 'passed' | 'failed' | 'pending' | 'todo' {
+  if (status === 'passed') return 'passed';
+  if (status === 'skipped') return 'pending';
+  if (status === 'failed' || status === 'timedOut' || status === 'interrupted') {
+    return 'failed';
+  }
+  return 'pending';
+}
+
+function convertPlaywrightJsonReport(
+  pw: PlaywrightNativeJsonReport,
+): JestVitestJsonReport {
+  const rootDir = pw.config?.rootDir ?? process.cwd();
+  const byFile = new Map<
+    string,
+    { startTime?: number; endTime?: number; assertions: JestAssertionResult[] }
+  >();
+
+  const walkSuite = (
+    suite: PlaywrightNativeSuite,
+    ancestors: string[],
+  ): void => {
+    const isFileSuite = Boolean(suite.file && suite.title === suite.file);
+    const nextAncestors =
+      suite.title && !isFileSuite ? [...ancestors, suite.title] : ancestors;
+
+    for (const spec of suite.specs ?? []) {
+      const file = spec.file ?? suite.file ?? 'unknown';
+      const fullPath = resolve(rootDir, file);
+      for (const testItem of spec.tests ?? []) {
+        const result =
+          testItem.results?.[testItem.results.length - 1] ??
+          testItem.results?.[0];
+        if (!result) continue;
+
+        const acc = createQaMetaAccumulator();
+        for (const att of result.attachments ?? []) {
+          if (att.contentType !== QA_METADATA_CONTENT_TYPE || !att.body) {
+            continue;
+          }
+          try {
+            const decoded = Buffer.from(att.body, 'base64').toString('utf8');
+            const msg = JSON.parse(decoded) as Record<string, unknown>;
+            if (typeof msg.title === 'string' && msg.title) {
+              applyQaAnnotation(acc, { type: 'qa-title', body: msg.title });
+            }
+            if (typeof msg.comment === 'string' && msg.comment) {
+              applyQaAnnotation(acc, { type: 'qa-comment', body: msg.comment });
+            }
+            if (typeof msg.suite === 'string' && msg.suite) {
+              applyQaAnnotation(acc, { type: 'qa-suite', body: msg.suite });
+            }
+            if (typeof msg.suiteId === 'string' && msg.suiteId) {
+              applyQaAnnotation(acc, {
+                type: 'qa-suite-id',
+                body: msg.suiteId,
+              });
+            }
+            if (typeof msg.planId === 'string' && msg.planId) {
+              applyQaAnnotation(acc, { type: 'qa-plan-id', body: msg.planId });
+            }
+            if (typeof msg.planName === 'string' && msg.planName) {
+              applyQaAnnotation(acc, { type: 'qa-plan', body: msg.planName });
+            }
+            if (typeof msg.fixVersion === 'string' && msg.fixVersion) {
+              applyQaAnnotation(acc, {
+                type: 'qa-fix-version',
+                body: msg.fixVersion,
+              });
+            }
+            if (typeof msg.sprintName === 'string' && msg.sprintName) {
+              applyQaAnnotation(acc, {
+                type: 'qa-sprint-name',
+                body: msg.sprintName,
+              });
+            }
+            if (msg.labels !== undefined && msg.labels !== null) {
+              applyQaAnnotation(acc, {
+                type: 'qa-labels',
+                body: msg.labels as string | string[],
+              });
+            }
+            if (msg.fields && typeof msg.fields === 'object') {
+              applyQaAnnotation(acc, {
+                type: 'qa-fields',
+                body: msg.fields as Record<string, string>,
+              });
+            }
+            if (msg.parameters && typeof msg.parameters === 'object') {
+              applyQaAnnotation(acc, {
+                type: 'qa-parameters',
+                body: msg.parameters as Record<string, string>,
+              });
+            }
+            if (Array.isArray(msg.issueKeys) && msg.issueKeys.length > 0) {
+              applyQaAnnotation(acc, {
+                type: 'qa-issue-keys',
+                body: msg.issueKeys as string[],
+              });
+            }
+            if (msg.ignore) {
+              applyQaAnnotation(acc, { type: 'qa-ignore', body: true });
+            }
+            if (Array.isArray(msg.attachments)) {
+              for (const item of msg.attachments) {
+                if (item && typeof item === 'object') {
+                  const rec = item as { name?: string; contentType?: string };
+                  applyQaAnnotation(acc, {
+                    type: 'qa-attach',
+                    body: { name: rec.name, contentType: rec.contentType },
+                  });
+                }
+              }
+            }
+          } catch {
+            // ignore malformed metadata attachment
+          }
+        }
+
+        const walkSteps = (steps?: PlaywrightNativeStep[]): void => {
+          for (const step of steps ?? []) {
+            if (step.category && step.category !== 'test.step') {
+              walkSteps(step.steps);
+              continue;
+            }
+            if (step.title) {
+              acc.steps.push({
+                name: step.title,
+                status: step.error ? 'failed' : 'passed',
+              });
+            }
+            walkSteps(step.steps);
+          }
+        };
+        walkSteps(result.steps);
+
+        const wire = toQaMetaWire(acc, {
+          framework: 'playwright',
+          reporter: '@ai-testing-tool/forge-playwright',
+        });
+
+        const title = spec.title ?? 'unknown';
+        const fullName =
+          nextAncestors.length > 0
+            ? `${nextAncestors.join(' ')} ${title}`
+            : title;
+        const failureMessages = (result.errors ?? [])
+          .map((e) => {
+            if (typeof e === 'string') return e;
+            if (e && typeof e === 'object' && 'message' in e) {
+              return String(e.message ?? '');
+            }
+            return String(e);
+          })
+          .filter(Boolean);
+
+        const assertion: JestAssertionResult = {
+          fullName,
+          title,
+          status: mapPlaywrightNativeStatus(result.status),
+          duration: result.duration,
+          failureMessages,
+        };
+        if (wire) {
+          assertion.meta = { qa: wire };
+        }
+
+        const entry = byFile.get(fullPath) ?? { assertions: [] };
+        const startMs = result.startTime
+          ? Date.parse(result.startTime)
+          : undefined;
+        if (startMs && (!entry.startTime || startMs < entry.startTime)) {
+          entry.startTime = startMs;
+        }
+        if (startMs && typeof result.duration === 'number') {
+          const endMs = startMs + result.duration;
+          if (!entry.endTime || endMs > entry.endTime) {
+            entry.endTime = endMs;
+          }
+        }
+        entry.assertions.push(assertion);
+        byFile.set(fullPath, entry);
+      }
+    }
+
+    for (const child of suite.suites ?? []) {
+      walkSuite(child, nextAncestors);
+    }
+  };
+
+  for (const suite of pw.suites ?? []) {
+    walkSuite(suite, []);
+  }
+
+  const testResults: JestTestFileResult[] = [];
+  let numPassedTests = 0;
+  let numFailedTests = 0;
+  let numPendingTests = 0;
+  let numTodoTests = 0;
+
+  for (const [file, data] of byFile) {
+    if (data.assertions.length === 0) continue;
+    for (const a of data.assertions) {
+      if (a.status === 'passed') numPassedTests += 1;
+      else if (a.status === 'failed') numFailedTests += 1;
+      else if (a.status === 'todo') numTodoTests += 1;
+      else numPendingTests += 1;
+    }
+    const status = data.assertions.some((a) => a.status === 'failed')
+      ? 'failed'
+      : 'passed';
+    testResults.push({
+      name: normalizeReportFilePath(file),
+      status,
+      startTime: data.startTime,
+      endTime: data.endTime,
+      assertionResults: data.assertions,
+    });
+  }
+
+  const numFailedTestSuites = testResults.filter(
+    (t) => t.status === 'failed',
+  ).length;
+  const startTime = pw.stats?.startTime
+    ? Date.parse(pw.stats.startTime)
+    : Date.now();
+
+  return {
+    numTotalTestSuites: testResults.length,
+    numPassedTestSuites: testResults.length - numFailedTestSuites,
+    numFailedTestSuites,
+    numPendingTestSuites: 0,
+    numTotalTests:
+      numPassedTests + numFailedTests + numPendingTests + numTodoTests,
+    numPassedTests,
+    numFailedTests,
+    numPendingTests,
+    numTodoTests,
+    startTime,
+    success: numFailedTests === 0,
+    testResults,
+  };
+}
+
 function readJsonReport(path: string): JestVitestJsonReport {
   const parsed = JSON.parse(readText(path)) as unknown;
   if (
@@ -123,6 +433,9 @@ function readJsonReport(path: string): JestVitestJsonReport {
   ) {
     return (parsed as IngestPayload).report as JestVitestJsonReport;
   }
+  if (isPlaywrightNativeJsonReport(parsed)) {
+    return convertPlaywrightJsonReport(parsed);
+  }
   return parsed as JestVitestJsonReport;
 }
 
@@ -131,10 +444,12 @@ function remapReportIssueKeyPrefix<T extends JestVitestJsonReport>(
   fromProjectKey: string | undefined,
   toProjectKey: string,
 ): T {
-  if (!fromProjectKey || fromProjectKey === toProjectKey) {
+  if (fromProjectKey && fromProjectKey === toProjectKey) {
     return report;
   }
-  const prefixPattern = new RegExp(`^${fromProjectKey}-(\\d+)$`);
+  const prefixPattern = fromProjectKey
+    ? new RegExp(`^${fromProjectKey}-(\\d+)$`)
+    : /^[A-Z][A-Z0-9_]*-(\d+)$/;
   return {
     ...report,
     testResults: report.testResults?.map((suite) => ({
@@ -234,7 +549,11 @@ async function main(): Promise<void> {
       }
     : buildIngestPayload({
         projectKey: resolvedProjectKey,
-        report: readJsonReport(reportPath),
+        report: remapReportIssueKeyPrefix(
+          readJsonReport(reportPath),
+          undefined,
+          resolvedProjectKey,
+        ),
         format,
         launchName: args.launch ?? merged.launchName,
         planId: args.planId ?? merged.planId,
