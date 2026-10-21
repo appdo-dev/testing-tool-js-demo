@@ -46,8 +46,62 @@ const issuePrefixByProject: Record<string, string> = {
   'qa-wdio': 'AUTH-10',
 };
 
+const reportFile =
+  process.env.AI_TESTING_TOOL_FILE_PATH ??
+  path.join(monorepoRoot, 'ai-testing-tool-results.json');
+
+/**
+ * When GitHub Actions / CI runs `npx vitest run --reporter=json --outputFile=ai-testing-tool-results.json`,
+ * Vitest CLI flags override `test.reporters` with `[['json', {}]]`, which strips `meta.qa`
+ * (issueKeys, suite, steps, host). This hook swaps the CLI `json` reporter for
+ * `@ai-testing-tool/forge-vitest` writing to the requested `--outputFile`.
+ */
+const aiTestingToolCliBridgePlugin = {
+  name: 'ai-testing-tool-cli-bridge',
+  configureVitest({
+    vitest,
+  }: {
+    vitest: {
+      config: {
+        reporters: unknown[];
+        outputFile?: string | Record<string, string>;
+      };
+    };
+  }) {
+    const hasForgeReporter = vitest.config.reporters.some(
+      (r) =>
+        r === '@ai-testing-tool/forge-vitest' ||
+        (Array.isArray(r) && r[0] === '@ai-testing-tool/forge-vitest'),
+    );
+    if (hasForgeReporter) return;
+
+    const cliOutFile =
+      typeof vitest.config.outputFile === 'string'
+        ? vitest.config.outputFile
+        : vitest.config.outputFile?.json;
+    const outPath = cliOutFile
+      ? path.resolve(monorepoRoot, cliOutFile)
+      : reportFile;
+
+    vitest.config.outputFile = undefined;
+    vitest.config.reporters = [
+      ['default', {}],
+      [
+        '@ai-testing-tool/forge-vitest',
+        {
+          mode: 'file',
+          projectKey: process.env.AI_TESTING_TOOL_PROJECT_KEY ?? 'AUTH',
+          launchName: process.env.AI_TESTING_TOOL_LAUNCH_NAME ?? 'sdk',
+          file: { path: outPath },
+        },
+      ],
+    ];
+  },
+};
+
 function projectConfig(name: string, root: string, include: string) {
   return {
+    plugins: [aiTestingToolCliBridgePlugin],
     resolve: {
       alias: {
         '@qa/test': qaTestHelper,
@@ -66,10 +120,6 @@ function projectConfig(name: string, root: string, include: string) {
     },
   };
 }
-
-const reportFile =
-  process.env.AI_TESTING_TOOL_FILE_PATH ??
-  path.join(monorepoRoot, 'ai-testing-tool-results.json');
 
 export default defineConfig({
   test: {

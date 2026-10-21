@@ -126,6 +126,47 @@ function readJsonReport(path: string): JestVitestJsonReport {
   return parsed as JestVitestJsonReport;
 }
 
+function remapReportIssueKeyPrefix<T extends JestVitestJsonReport>(
+  report: T,
+  fromProjectKey: string | undefined,
+  toProjectKey: string,
+): T {
+  if (!fromProjectKey || fromProjectKey === toProjectKey) {
+    return report;
+  }
+  const prefixPattern = new RegExp(`^${fromProjectKey}-(\\d+)$`);
+  return {
+    ...report,
+    testResults: report.testResults?.map((suite) => ({
+      ...suite,
+      assertionResults: suite.assertionResults?.map((assertion) => {
+        const qa =
+          assertion.meta?.qa && typeof assertion.meta.qa === 'object'
+            ? (assertion.meta.qa as Record<string, unknown>)
+            : undefined;
+        const issueKeys = qa?.issueKeys;
+        if (!qa || !Array.isArray(issueKeys) || issueKeys.length === 0) {
+          return assertion;
+        }
+        return {
+          ...assertion,
+          meta: {
+            ...assertion.meta,
+            qa: {
+              ...qa,
+              issueKeys: issueKeys.map((key) =>
+                typeof key === 'string'
+                  ? key.replace(prefixPattern, `${toProjectKey}-$1`)
+                  : key,
+              ),
+            },
+          },
+        };
+      }),
+    })),
+  };
+}
+
 /** Progress on stderr so stdout stays machine-readable JSON. */
 function reportUploadProgress(progress: IngestUploadProgress): void {
   const line = `Ingest upload: ${progress.percent}% — ${progress.message}`;
@@ -168,25 +209,32 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const report: JestVitestJsonReport = existingPayload
-    ? existingPayload.report
-    : readJsonReport(reportPath);
-
+  const ci = detectCiEnvironment();
   const payload = existingPayload
     ? {
         ...existingPayload,
         projectKey: resolvedProjectKey,
+        report: remapReportIssueKeyPrefix(
+          existingPayload.report,
+          existingPayload.projectKey,
+          resolvedProjectKey,
+        ),
         launchName: args.launch ?? merged.launchName ?? existingPayload.launchName,
         planId: args.planId ?? merged.planId ?? existingPayload.planId,
         planKey: args.planKey ?? merged.planKey ?? existingPayload.planKey,
         planName: args.plan ?? merged.planName ?? existingPayload.planName,
         fixVersion: args.fixVersion ?? merged.fixVersion ?? existingPayload.fixVersion,
         sprintName: args.sprint ?? merged.sprintName ?? existingPayload.sprintName,
-        ci: detectCiEnvironment(),
+        ciPlatform: ci.ciPlatform ?? existingPayload.ciPlatform,
+        ciBuildUrl: ci.ciBuildUrl ?? existingPayload.ciBuildUrl,
+        gitCommitSha: ci.gitCommitSha ?? existingPayload.gitCommitSha,
+        gitBranch: ci.gitBranch ?? existingPayload.gitBranch,
+        gitAuthorName: ci.gitAuthorName ?? existingPayload.gitAuthorName,
+        gitHashCommitUrl: ci.gitHashCommitUrl ?? existingPayload.gitHashCommitUrl,
       }
     : buildIngestPayload({
         projectKey: resolvedProjectKey,
-        report,
+        report: readJsonReport(reportPath),
         format,
         launchName: args.launch ?? merged.launchName,
         planId: args.planId ?? merged.planId,
@@ -194,7 +242,7 @@ async function main(): Promise<void> {
         planName: args.plan ?? merged.planName,
         fixVersion: args.fixVersion ?? merged.fixVersion,
         sprintName: args.sprint ?? merged.sprintName,
-        ci: detectCiEnvironment(),
+        ci,
       });
 
   const client = new IngestClient({

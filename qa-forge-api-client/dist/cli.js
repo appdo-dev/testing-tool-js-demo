@@ -95,6 +95,39 @@ function readJsonReport(path) {
     }
     return parsed;
 }
+function remapReportIssueKeyPrefix(report, fromProjectKey, toProjectKey) {
+    if (!fromProjectKey || fromProjectKey === toProjectKey) {
+        return report;
+    }
+    const prefixPattern = new RegExp(`^${fromProjectKey}-(\\d+)$`);
+    return {
+        ...report,
+        testResults: report.testResults?.map((suite) => ({
+            ...suite,
+            assertionResults: suite.assertionResults?.map((assertion) => {
+                const qa = assertion.meta?.qa && typeof assertion.meta.qa === 'object'
+                    ? assertion.meta.qa
+                    : undefined;
+                const issueKeys = qa?.issueKeys;
+                if (!qa || !Array.isArray(issueKeys) || issueKeys.length === 0) {
+                    return assertion;
+                }
+                return {
+                    ...assertion,
+                    meta: {
+                        ...assertion.meta,
+                        qa: {
+                            ...qa,
+                            issueKeys: issueKeys.map((key) => typeof key === 'string'
+                                ? key.replace(prefixPattern, `${toProjectKey}-$1`)
+                                : key),
+                        },
+                    },
+                };
+            }),
+        })),
+    };
+}
 /** Progress on stderr so stdout stays machine-readable JSON. */
 function reportUploadProgress(progress) {
     const line = `Ingest upload: ${progress.percent}% — ${progress.message}`;
@@ -132,24 +165,28 @@ async function main() {
         console.error('Missing --project (or projectKey in ai-testing-tool.config.json / AI_TESTING_TOOL_PROJECT_KEY)');
         process.exit(1);
     }
-    const report = existingPayload
-        ? existingPayload.report
-        : readJsonReport(reportPath);
+    const ci = (0, forge_commons_1.detectCiEnvironment)();
     const payload = existingPayload
         ? {
             ...existingPayload,
             projectKey: resolvedProjectKey,
+            report: remapReportIssueKeyPrefix(existingPayload.report, existingPayload.projectKey, resolvedProjectKey),
             launchName: args.launch ?? merged.launchName ?? existingPayload.launchName,
             planId: args.planId ?? merged.planId ?? existingPayload.planId,
             planKey: args.planKey ?? merged.planKey ?? existingPayload.planKey,
             planName: args.plan ?? merged.planName ?? existingPayload.planName,
             fixVersion: args.fixVersion ?? merged.fixVersion ?? existingPayload.fixVersion,
             sprintName: args.sprint ?? merged.sprintName ?? existingPayload.sprintName,
-            ci: (0, forge_commons_1.detectCiEnvironment)(),
+            ciPlatform: ci.ciPlatform ?? existingPayload.ciPlatform,
+            ciBuildUrl: ci.ciBuildUrl ?? existingPayload.ciBuildUrl,
+            gitCommitSha: ci.gitCommitSha ?? existingPayload.gitCommitSha,
+            gitBranch: ci.gitBranch ?? existingPayload.gitBranch,
+            gitAuthorName: ci.gitAuthorName ?? existingPayload.gitAuthorName,
+            gitHashCommitUrl: ci.gitHashCommitUrl ?? existingPayload.gitHashCommitUrl,
         }
         : (0, forge_commons_1.buildIngestPayload)({
             projectKey: resolvedProjectKey,
-            report,
+            report: readJsonReport(reportPath),
             format,
             launchName: args.launch ?? merged.launchName,
             planId: args.planId ?? merged.planId,
@@ -157,7 +194,7 @@ async function main() {
             planName: args.plan ?? merged.planName,
             fixVersion: args.fixVersion ?? merged.fixVersion,
             sprintName: args.sprint ?? merged.sprintName,
-            ci: (0, forge_commons_1.detectCiEnvironment)(),
+            ci,
         });
     const client = new forge_commons_1.IngestClient({
         url: args.url ?? merged.ingest?.url,
